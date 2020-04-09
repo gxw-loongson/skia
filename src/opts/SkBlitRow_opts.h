@@ -79,6 +79,12 @@ static inline uint8x8_t SkPMSrcOver_neon2(uint8x8_t dst, uint8x8_t src) {
 
 #endif
 
+#if defined(SK_MIPS_HAS_MSA)
+    #include "SkColor_opts_msa.h"
+#elif defined(SK_MIPS_HAS_MMI)
+    #include "SkColor_opts_mmi.h"
+#endif
+
 /*not static*/ inline
 void blit_row_s32a_opaque(SkPMColor* dst, const SkPMColor* src, int len, U8CPU alpha) {
     SkASSERT(alpha == 0xFF);
@@ -230,6 +236,113 @@ void blit_row_s32a_opaque(SkPMColor* dst, const SkPMColor* src, int len, U8CPU a
         vst1_lane_u32(dst, vreinterpret_u32_u8(result), 0);
     }
     return;
+
+#elif defined(SK_MIPS_HAS_MSA)
+    while (len >= 16) {
+	// Load 16 source pixels.
+	v4i32 s0 = __msa_ld_w((void*)(src), 0),
+              s1 = __msa_ld_w((void*)(src), 16),
+              s2 = __msa_ld_w((void*)(src), 32),
+              s3 = __msa_ld_w((void*)(src), 48);
+
+        v4i32 ORed = (v4i32)__msa_or_v((v16u8)s3, __msa_or_v((v16u8)s2,
+                      __msa_or_v((v16u8)s1, (v16u8)s0)));
+	v16i8 zero = {0};
+	v16i8 shuffle_vec = {3, 7, 11, 15, 0};
+	v16i8 ORed_temp = __msa_vshf_b(shuffle_vec, (v16i8)ORed, (v16i8)ORed);
+	ORed_temp = __msa_ceq_b(ORed_temp, zero);
+	int ORed_int = __msa_copy_s_w((v4i32)ORed_temp, 0);
+	if(0xffffffff == ORed_int){
+            src += 16;
+            dst += 16;
+            len -= 16;
+            continue;
+        }
+
+        v4i32 ANDed = (v4i32)__msa_and_v((v16u8)s3, (v16u8)__msa_and_v((v16u8)s2,
+                      (v16u8)__msa_and_v((v16u8)s1, (v16u8)s0)));
+	v16i8 one = __msa_fill_b(0xff);
+	v16i8 ANDed_temp = __msa_vshf_b(shuffle_vec, (v16i8)ANDed, (v16i8)ANDed);
+	ANDed_temp = __msa_ceq_b(ANDed_temp, one);
+	int ANDed_int = __msa_copy_s_w((v4i32)ANDed_temp, 0);
+	if(ANDed_int == 0xffffffff){
+            __msa_st_w((v4i32)s0, (void*)dst, 0);
+            __msa_st_w((v4i32)s1, (void*)dst, 16);
+            __msa_st_w((v4i32)s2, (void*)dst, 32);
+            __msa_st_w((v4i32)s3, (void*)dst, 48);
+            src += 16;
+            dst += 16;
+            len -= 16;
+            continue;
+        }
+
+        // TODO: This math is wrong.
+        // Do SrcOver.
+        __msa_st_w(SkPMSrcOver_MSA((v4i32)s0, (v16u8)__msa_ld_w((void *)dst, 0)),
+                                   (void*)dst, 0);
+        __msa_st_w(SkPMSrcOver_MSA((v4i32)s1, (v16u8)__msa_ld_w((void *)dst, 16)),
+                                   (void*)dst, 16);
+        __msa_st_w(SkPMSrcOver_MSA((v4i32)s2, (v16u8)__msa_ld_w((void *)dst, 32)),
+                                   (void*)dst, 32);
+        __msa_st_w(SkPMSrcOver_MSA((v4i32)s3, (v16u8)__msa_ld_w((void *)dst, 48)),
+                                   (void*)dst, 48);
+
+        src += 16;
+        dst += 16;
+        len -= 16;
+    }
+
+#elif defined(SK_MIPS_HAS_MMI)
+    while (len >= 16) {
+        // Load 16 source pixels.
+        auto s0 = _mm_loadu_si128((const __m128i*)(src) + 0),
+             s1 = _mm_loadu_si128((const __m128i*)(src) + 1),
+             s2 = _mm_loadu_si128((const __m128i*)(src) + 2),
+             s3 = _mm_loadu_si128((const __m128i*)(src) + 3);
+
+        const auto alphaMask = _mm_set1_epi32(0xFF000000);
+
+        auto ORed = _mm_or_si128(s3, _mm_or_si128(s2, _mm_or_si128(s1, s0)));
+        if (0xffff == _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(ORed, alphaMask),
+                                                       _mm_setzero_si128()))) {
+            // All 16 source pixels are transparent.  Nothing to do.
+            src += 16;
+            dst += 16;
+            len -= 16;
+            continue;
+        }
+
+        auto d0 = (__m128i*)(dst) + 0,
+             d1 = (__m128i*)(dst) + 1,
+             d2 = (__m128i*)(dst) + 2,
+             d3 = (__m128i*)(dst) + 3;
+
+        auto ANDed = _mm_and_si128(s3, _mm_and_si128(s2, _mm_and_si128(s1, s0)));
+        if (0xffff == _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(ANDed, alphaMask),
+                                                       alphaMask))) {
+	    // All 16 source pixels are opaque.  SrcOver becomes Src.
+	    _mm_storeu_si128(d0, s0);
+            _mm_storeu_si128(d1, s1);
+            _mm_storeu_si128(d2, s2);
+            _mm_storeu_si128(d3, s3);
+            src += 16;
+            dst += 16;
+            len -= 16;
+            continue;
+        }
+
+        // TODO: This math is wrong.
+        // Do SrcOver.
+        _mm_storeu_si128(d0, SkPMSrcOver_MMI(s0, _mm_loadu_si128(d0)));
+        _mm_storeu_si128(d1, SkPMSrcOver_MMI(s1, _mm_loadu_si128(d1)));
+        _mm_storeu_si128(d2, SkPMSrcOver_MMI(s2, _mm_loadu_si128(d2)));
+        _mm_storeu_si128(d3, SkPMSrcOver_MMI(s3, _mm_loadu_si128(d3)));
+
+        src += 16;
+        dst += 16;
+        len -= 16;
+    }
+
 #endif
 
     while (len-- > 0) {

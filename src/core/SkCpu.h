@@ -46,6 +46,14 @@ struct SkCpu {
         CRC32    = 1 << 3,
         ASIMDHP  = 1 << 4,
     };
+    enum {
+        DSP     = 1 << 0,
+        MMI     = 1 << 1,
+        MSA     = 1 << 2,
+        MSA2    = 1 << 3,
+        LSX     = 1 << 4,
+        LASX    = 1 << 5,
+    };
 
     static void CacheRuntimeFeatures();
     static bool Supports(uint32_t);

@@ -176,6 +176,26 @@
 #endif
 
 //////////////////////////////////////////////////////////////////////
+//// MIPS defines
+
+#if defined(__MIPSEL__) || defined(__MIPSEL) || defined(_MIPSEL) || defined(MIPSEL)
+    #define SK_CPU_MIPS 1
+#endif
+
+#if defined(_MIPS_ARCH_MIPS64) || defined(__mips64)
+    #define SK_CPU_MIPS64 1
+#endif
+
+#if (defined(SK_CPU_MIPS) || defined(SK_CPU_MIPS64)) && !defined(SK_BUILD_NO_OPTS)
+    #if defined(__mips_loongson_mmi) && defined(__mips_loongson_ext)
+        #define SK_MIPS_HAS_MMI 1
+    #endif
+    #if defined(__mips_msa)
+        #define SK_MIPS_HAS_MSA 1
+    #endif
+#endif
+
+//////////////////////////////////////////////////////////////////////
 
 #if !defined(SKIA_IMPLEMENTATION)
     #define SKIA_IMPLEMENTATION 0

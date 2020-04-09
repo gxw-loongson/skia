@@ -259,6 +259,12 @@ opts("crc32") {
   cflags = [ "-march=armv8-a+crc" ]
 }
 
+opts("msa") {
+  enabled = current_cpu == "mips64el"
+  sources = skia_opts.msa_sources
+  cflags = [ "-mmsa", "-mfp64", ]
+}
+
 opts("sse2") {
   enabled = is_x86
   sources = skia_opts.sse2_sources
@@ -912,6 +918,7 @@ component("skia") {
     ":hsw",
     ":jpeg",
     ":none",
+    ":msa",
     ":png",
     ":raw",
     ":sse2",
@@ -2362,7 +2369,8 @@ if (skia_enable_tools) {
     }
   }
 
-  if (is_linux || is_mac || is_ios) {
+  if ((is_linux || is_mac || is_ios) && target_cpu != "mips64el" &&
+      target_cpu != "loongson3a") {
     test_app("SkiaSDLExample") {
       sources = [
         "example/SkiaSDLExample.cpp",

@@ -32,6 +32,10 @@
     #define SK_OPTS_NS sse2
 #elif SK_CPU_SSE_LEVEL >= SK_CPU_SSE_LEVEL_SSE1
     #define SK_OPTS_NS sse
+#elif defined(SK_MIPS_HAS_MSA)
+    #define SK_OPTS_NS msa
+#elif defined(SK_MIPS_HAS_MMI)
+    #define SK_OPTS_NS mmi
 #else
     #define SK_OPTS_NS portable
 #endif
@@ -98,6 +102,7 @@ namespace SkOpts {
     void Init_avx();
     void Init_hsw();
     void Init_crc32();
+    void Init_msa();
 
     static void init() {
 #if !defined(SK_BUILD_NO_OPTS)
@@ -121,6 +126,9 @@ namespace SkOpts {
 
     #elif defined(SK_CPU_ARM64)
         if (SkCpu::Supports(SkCpu::CRC32)) { Init_crc32(); }
+
+    #elif defined(SK_CPU_MIPS) || defined(SK_CPU_MIPS64)
+        if (SkCpu::Supports(SkCpu::MSA)) { Init_msa(); }
 
     #endif
 #endif

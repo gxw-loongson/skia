@@ -115,6 +115,147 @@
         return features;
     }
 
+#elif defined(SK_CPU_MIPS) || defined(SK_CPU_MIPS64)
+    #include <sys/wait.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <unistd.h>
+    #include <sys/types.h>
+    #include <signal.h>
+    #include <fcntl.h>
+    #include <cstring>
+
+    #define MMI_MASK    0x00000010
+    #define MSA1_MASK   0x00000020
+    #define MSA2_MASK   0x00000040
+    #define LSX1_MASK   0x00000200
+    #define LSX2_MASK   0x00000400
+    #define LASX_MASK   0x00000800
+    int fd[2];
+    int support_cpucfg;
+
+    static void handler(int signum)
+    {
+        close(fd[1]);
+        exit(1);
+    }
+
+    /* Brief :  Function to check if cpucfg supported.
+     * Return:  1   supported
+     *          0   not supported
+     */
+    static int cpucfg_test(void)
+    {
+        pid_t pid;
+        int status = 0;
+
+        support_cpucfg = 0;
+        pipe(fd);
+        pid = fork();
+        if (pid == 0) { /* Subprocess */
+            struct sigaction act;
+            close(fd[0]);
+            /* Set signal action for SIGILL. */
+            act.sa_handler = handler;
+            sigaction(SIGILL,&act,NULL);
+
+            /* Execute cpucfg in subprocess. */
+            __asm__ volatile(
+                ".insn              \n\t"
+                ".word (0xc8080118) \n\t"
+                :::
+            );
+            support_cpucfg = 1;
+            write(fd[1],&support_cpucfg,sizeof(support_cpucfg));
+            close(fd[1]);
+            exit(0);
+        } else if (pid > 0){ /* Parent process*/
+            close(fd[1]);
+            if ((waitpid(pid,&status,0) <= 0) ||
+                (read(fd[0],&support_cpucfg,sizeof(support_cpucfg)) <= 0))
+                support_cpucfg = 0;
+            close(fd[0]);
+        } else {
+            support_cpucfg = 0;
+        }
+
+        return support_cpucfg;
+    }
+
+    static int get_cpu_flags_from_cpucfg(void)
+    {
+        int flags = 0;
+        int flag = 0;
+        __asm__ volatile(
+            ".insn                     \n\t"
+            "dli    $8,    0x01        \n\t"
+            ".word (0xc9084918)        \n\t"
+            "usw    $9,    0x00(%0)    \n\t"
+            :
+            : "r"(&flag)
+            : "memory"
+        );
+        if (flag & MMI_MASK)
+            flags |= SkCpu::MMI;
+        if (flag & MSA1_MASK)
+            flags |= SkCpu::MSA;
+        if (flag & MSA2_MASK)
+            flags |= SkCpu::MSA2;
+        if (flag & LSX1_MASK && flag & LSX2_MASK)
+            flags |= SkCpu::LSX;
+        if (flag & LASX_MASK)
+            flags |= SkCpu::LASX;
+        return flags;
+    }
+
+    static int get_cpu_flags_from_cpuinfo(void)
+    {
+        uint32_t flags = 0;
+
+# ifdef __linux__
+        FILE* fp = fopen("/proc/cpuinfo", "r");
+        if (!fp)
+            return flags;
+
+        char buf[200];
+        memset(buf, 0, sizeof(buf));
+        while (fgets(buf, sizeof(buf), fp)) {
+            if (!strncmp(buf, "cpu model", strlen("cpu model"))) {
+                if (strstr(buf, "Loongson-3") || strstr(buf, "Loongson-2K")) {
+                    flags |= SkCpu::MMI;
+                }
+                break;
+            }
+        }
+        while (fgets(buf, sizeof(buf), fp)) {
+            if(!strncmp(buf, "ASEs implemented", strlen("ASEs implemented"))) {
+                if (strstr(buf, "loongson-mmi") && strstr(buf, "loongson-ext")) {
+                    flags |= SkCpu::MMI;
+                }
+                if (strstr(buf, "msa")) {
+                    flags |= SkCpu::MSA;
+                }
+                break;
+            }
+        }
+        fclose(fp);
+# endif
+
+        return flags;
+    }
+
+    static uint32_t read_cpu_features() {
+        int flags = 0;
+        int ret = 0;
+
+        ret = cpucfg_test();
+        if (ret == 1)
+            flags = get_cpu_flags_from_cpucfg();
+        else
+            flags = get_cpu_flags_from_cpuinfo();
+        return flags;
+    }
+
 #else
     static uint32_t read_cpu_features() {
         return 0;
