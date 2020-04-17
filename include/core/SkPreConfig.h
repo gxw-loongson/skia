@@ -187,7 +187,7 @@
 #endif
 
 #if (defined(SK_CPU_MIPS) || defined(SK_CPU_MIPS64)) && !defined(SK_BUILD_NO_OPTS)
-    #if defined(__mips_loongson_mmi) && defined(__mips_loongson_ext)
+    #if (defined(__mips_loongson_mmi) && defined(__mips_loongson_ext)) || defined(_MIPS_ARCH_LOONGSON3A)
         #define SK_MIPS_HAS_MMI 1
     #endif
     #if defined(__mips_msa)

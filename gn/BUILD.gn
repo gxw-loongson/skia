@@ -122,7 +122,7 @@ config("default") {
       # Causes an internal compiler error.
       "-DSKCMS_PORTABLE",
     ]
-    cflags_cc += [ "-mno-madd4", "-flifetime-dse=1", ]
+    cflags_cc += [ "-mno-madd4", ] #"-flifetime-dse=1", ]
   } else if (current_cpu == "mips64el") {
     asmflags += [ "-march=mips64" ]
     cflags += [ "-march=mips64" ]
@@ -311,7 +311,7 @@ config("warnings") {
       "-Wvla",
 
       "-Wno-deprecated-declarations",
-      "-Wno-maybe-uninitialized",
+      "-Wno-uninitialized",
     ]
     cflags_cc += [
       "-Wnon-virtual-dtor",
