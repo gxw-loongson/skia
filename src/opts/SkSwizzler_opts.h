@@ -16,6 +16,8 @@
     #include <immintrin.h>
 #elif defined(SK_ARM_HAS_NEON)
     #include <arm_neon.h>
+#elif defined(SK_MIPS_HAS_MSA)
+    #include "msa_macros.h"
 #endif
 
 namespace SK_OPTS_NS {
@@ -756,6 +758,322 @@ static void inverted_cmyk_to(uint32_t* dst, const uint32_t* src, int count) {
         convert8(&lo, &hi);
 
         _mm_storeu_si128((__m128i*) dst, lo);
+
+        src += 4;
+        dst += 4;
+        count -= 4;
+    }
+
+    auto proc = (kBGR1 == format) ? inverted_CMYK_to_BGR1_portable : inverted_CMYK_to_RGB1_portable;
+    proc(dst, src, count);
+}
+
+/*not static*/ inline void inverted_CMYK_to_RGB1(uint32_t dst[], const uint32_t* src, int count) {
+    inverted_cmyk_to<kRGB1>(dst, src, count);
+}
+
+/*not static*/ inline void inverted_CMYK_to_BGR1(uint32_t dst[], const uint32_t* src, int count) {
+    inverted_cmyk_to<kBGR1>(dst, src, count);
+}
+
+#elif defined(SK_MIPS_HAS_MSA)
+
+// Scale a byte by another.
+// Inputs are stored in 16-bit lanes, but are not larger than 8-bits.
+static v8i16 scale(v8i16 x, v8i16 y) {
+    v8i16 out;
+    v4i32 out_l, out_h;
+    const v8i16 _128 = __msa_ldi_h(128);
+    const v4i32 _257 = __msa_ldi_w(257);
+    const v8i16 mask = {1, 3, 5, 7, 9, 11, 13, 15};
+    const v16i8 zeros = __msa_ldi_b(0);
+
+    // (x+127)/255 == ((x+128)*257)>>16 for 0 <= x <= 255*255.
+    // There is no instruction to intercept the result of multiplication in msa1.0,
+    // So there is going to be a little bit complicated than SSSE3 and NEON.
+    out = x * y;
+    out += _128;
+    // Unpack to 32 bit
+    MSA_ILVRL_H2(v4i32, zeros, out, out_l, out_h);
+    out_l *= _257;
+    out_h *= _257;
+    // Repack to 16 bit
+    MSA_VSHF_H(v8i16, out_h, out_l, mask, out);
+
+    return out;
+}
+
+template <bool kSwapRB>
+static void premul_should_swapRB(uint32_t* dst, const uint32_t* src, int count) {
+    auto premul8 = [](v4u32* lo, v4u32* hi) {
+        v16i8 rg, ba;
+        v8i16 r, g, b, a;
+        const v16i8 zeros = __msa_ldi_b(0);
+
+        // Swizzle the pixels to 8-bit planar.
+        if (kSwapRB) {
+            v16i8 planar = {2,6,10,14,  1,5,9,13, 0,4,8,12, 3,7,11,15};
+            MSA_VSHF_B(v4u32, *lo, *lo, planar, *lo);
+            MSA_VSHF_B(v4u32, *hi, *hi, planar, *hi);
+        } else {
+            v16i8 planar = {0,4,8,12,  1,5,9,13, 2,6,10,14, 3,7,11,15};
+            MSA_VSHF_B(v4u32, *lo, *lo, planar, *lo);
+            MSA_VSHF_B(v4u32, *hi, *hi, planar, *hi);
+        }
+        MSA_ILVRL_W2(v16i8, *hi, *lo, rg, ba);
+
+        // Unpack to 16-bit planar.
+        MSA_ILVRL_B4(v8i16, zeros, rg, zeros, ba, r, g, b, a);
+
+        // Premultiply!
+        r = scale(r, a);
+        g = scale(g, a);
+        b = scale(b, a);
+
+        // Repack into interlaced pixels.
+        g <<= 8;
+        a <<= 8;
+        rg = (v16i8)(r | g);
+        ba = (v16i8)(b | a);
+        MSA_ILVRL_H2(v4u32, ba, rg, *lo, *hi);
+    };
+
+    while (count >= 8) {
+        v4u32 lo, hi;
+
+        MSA_LD_V2(v4u32, src, 4, lo, hi);
+
+        premul8(&lo, &hi);
+
+        MSA_ST_V2(v4u32, lo, hi, dst, 4);
+
+        src += 8;
+        dst += 8;
+        count -= 8;
+    }
+
+    if (count >= 4) {
+        v4u32 lo;
+        v4u32 hi = {0, 0, 0, 0};
+
+        MSA_LD_V(v4u32, src, lo);
+
+        premul8(&lo, &hi);
+
+        MSA_ST_V(v4u32, lo, dst);
+
+        src += 4;
+        dst += 4;
+        count -= 4;
+    }
+
+    // Call portable code to finish up the tail of [0,4) pixels.
+    auto proc = kSwapRB ? RGBA_to_bgrA_portable : RGBA_to_rgbA_portable;
+    proc(dst, src, count);
+}
+
+/*not static*/ inline void RGBA_to_rgbA(uint32_t* dst, const uint32_t* src, int count) {
+    premul_should_swapRB<false>(dst, src, count);
+}
+
+/*not static*/ inline void RGBA_to_bgrA(uint32_t* dst, const uint32_t* src, int count) {
+    premul_should_swapRB<true>(dst, src, count);
+}
+
+/*not static*/ inline void RGBA_to_BGRA(uint32_t* dst, const uint32_t* src, int count) {
+    const v16i8 swapRB = {2,1,0,3, 6,5,4,7, 10,9,8,11, 14,13,12,15};
+
+    while (count >= 4) {
+        v16i8 rgba, bgra;
+        MSA_LD_V(v16i8, src, rgba);
+        MSA_VSHF_B(v16i8, rgba, rgba, swapRB, bgra);
+        MSA_ST_V(v16i8, bgra, dst);
+
+        src += 4;
+        dst += 4;
+        count -= 4;
+    }
+
+    RGBA_to_BGRA_portable(dst, src, count);
+}
+
+template <bool kSwapRB>
+static void insert_alpha_should_swaprb(uint32_t dst[], const uint8_t* src, int count) {
+    const int alphaMask_value = 0xFF000000;
+    const v4i32 alphaMask = __msa_fill_w(alphaMask_value);
+    const uint8_t X = 0xF; // Used a placeholder.  The value of X is irrelevant.
+    v16i8 mask0 = {2,1,0,X, 5,4,3,X, 8,7,6,X, 11,10,9,X};
+    v16i8 mask1 = {0,1,2,X, 3,4,5,X, 6,7,8,X, 9,10,11,X};
+    v16i8 expand;
+    if (kSwapRB) {
+        expand = mask0;
+    } else {
+        expand = mask1;
+    }
+
+    while (count >= 6) {
+        // Load a vector.  While this actually contains 5 pixels plus an
+        // extra component, we will discard all but the first four pixels on
+        // this iteration.
+        v16i8 rgb, rgba;
+        MSA_LD_V(v16i8, src, rgb);
+
+        // Expand the first four pixels to RGBX and then mask to RGB(FF).
+        MSA_VSHF_B(v16i8, rgb, rgb, expand, rgb);
+        rgba = (rgb | alphaMask);
+
+        // Store 4 pixels.
+        MSA_ST_V(v16i8, rgba, dst);
+
+        src += 4*3;
+        dst += 4;
+        count -= 4;
+    }
+
+    // Call portable code to finish up the tail of [0,4) pixels.
+    auto proc = kSwapRB ? RGB_to_BGR1_portable : RGB_to_RGB1_portable;
+    proc(dst, src, count);
+}
+
+/*not static*/ inline void RGB_to_RGB1(uint32_t dst[], const uint8_t* src, int count) {
+    insert_alpha_should_swaprb<false>(dst, src, count);
+}
+
+/*not static*/ inline void RGB_to_BGR1(uint32_t dst[], const uint8_t* src, int count) {
+    insert_alpha_should_swaprb<true>(dst, src, count);
+}
+
+/*not static*/ inline void gray_to_RGB1(uint32_t dst[], const uint8_t* src, int count) {
+    const int8_t alphas_value = 0xFF;
+    const v16i8 alphas = __msa_fill_b(alphas_value);
+    while (count >= 16) {
+        v16i8 grays, gg_lo, gg_hi, ga_lo, ga_hi;
+        v16i8 ggga0, ggga1, ggga2, ggga3;
+
+        // Load
+        MSA_LD_V(v16i8, src, grays);
+
+        // Unpack
+        MSA_ILVRL_B4(v16i8, grays, grays, alphas, grays,
+                     gg_lo, gg_hi, ga_lo, ga_hi);
+        MSA_ILVRL_H4(v16i8, ga_lo, gg_lo, ga_hi, gg_hi,
+                     ggga0, ggga1, ggga2, ggga3);
+
+        // Store
+        MSA_ST_V4(v16i8, ggga0, ggga1, ggga2, ggga3, dst, 4);
+
+        src += 16;
+        dst += 16;
+        count -= 16;
+    }
+
+    gray_to_RGB1_portable(dst, src, count);
+}
+
+/*not static*/ inline void grayA_to_RGBA(uint32_t dst[], const uint8_t* src, int count) {
+    while (count >= 8) {
+        v8i16 ga, gg, ggga_lo, ggga_hi;
+        const v8i16 ga_mask = __msa_ldi_h(0x00FF);
+
+        MSA_LD_V(v16i8, src, ga);
+
+        gg = (ga & ga_mask) | (ga << 8);
+
+        MSA_ILVRL_H2(v16i8, ga, gg, ggga_lo, ggga_hi);
+
+        MSA_ST_V2(v16i8, ggga_lo, ggga_hi, dst, 4);
+
+        src += 8*2;
+        dst += 8;
+        count -= 8;
+    }
+
+    grayA_to_RGBA_portable(dst, src, count);
+}
+
+/*not static*/ inline void grayA_to_rgbA(uint32_t dst[], const uint8_t* src, int count) {
+    while (count >= 8) {
+        v8i16 grayA, g0, a0, gg, ga, ggga_lo, ggga_hi;
+        const v8i16 grayA_mask = __msa_ldi_h(0x00FF);
+
+        MSA_LD_V(v8i16, src, grayA);
+        g0 = (grayA & grayA_mask);
+        a0 = __msa_srli_h(grayA, 8);
+
+        // Premultiply
+        g0 = scale(g0, a0);
+
+        gg = (g0 | (g0 << 8));
+        ga = (g0 | (a0 << 8));
+
+        MSA_ILVRL_H2(v16i8, ga, gg, ggga_lo, ggga_hi);
+
+        MSA_ST_V2(v16i8, ggga_lo, ggga_hi, dst, 4);
+
+        src += 8*2;
+        dst += 8;
+        count -= 8;
+    }
+
+    grayA_to_rgbA_portable(dst, src, count);
+}
+
+enum Format { kRGB1, kBGR1 };
+template <Format format>
+static void inverted_cmyk_to(uint32_t* dst, const uint32_t* src, int count) {
+    auto convert8 = [](v4i32* lo, v4i32* hi) {
+        v4i32 cm, yk;
+        v8i16 c, m, y, k, r, g, b, rg, ba;
+        const v16i8 zeros = __msa_ldi_b(0);
+        const int16_t FF_value = 0xFF00;
+        const v8i16 FF = __msa_fill_h(FF_value);
+
+        if (kBGR1 == format) {
+            v16i8 planar = {2,6,10,14, 1,5,9,13, 0,4,8,12, 3,7,11,15};
+            MSA_VSHF_B2(v4i32, *lo, *lo, *hi, *hi, planar, planar, *lo, *hi);
+        } else {
+            v16i8 planar = {0,4,8,12, 1,5,9,13, 2,6,10,14, 3,7,11,15};
+            MSA_VSHF_B2(v4i32, *lo, *lo, *hi, *hi, planar, planar, *lo, *hi);
+        }
+        MSA_ILVRL_W2(v4i32, *hi, *lo, cm, yk);
+
+        // Unpack to 16-bit planar
+        MSA_ILVRL_B4(v8i16, zeros, cm, zeros, yk, c, m, y, k);
+
+        // Scale to r, g, b.
+        r = scale(c, k);
+        g = scale(m, k);
+        b = scale(y, k);
+
+        // Repack into interlaced pixels
+        rg = (r | (g << 8));
+        ba = (b | FF);
+        MSA_ILVRL_H2(v4i32, ba, rg, *lo, *hi);
+    };
+
+    while (count >= 8) {
+        v4i32 lo, hi;
+
+        MSA_LD_V2(v4i32, src, 4, lo, hi);
+
+        convert8(&lo, &hi);
+
+        MSA_ST_V2(v4i32, lo, hi, dst, 4);
+
+        src += 8;
+        dst += 8;
+        count -= 8;
+    }
+
+    if (count >= 4) {
+        v4i32 lo;
+        v4i32 hi = __msa_ldi_b(0);
+
+        MSA_LD_V(v4i32, src, lo);
+
+        convert8(&lo, &hi);
+
+        MSA_ST_V(v4i32, lo, dst);
 
         src += 4;
         dst += 4;
